@@ -1,6 +1,8 @@
-from typing import List
+from typing import List, Callable
 import logging
 import aiohttp
+import asyncio
+import urllib.parse
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -12,20 +14,6 @@ class FpaError(Exception):
         self.code = code
         self.message = message
         super().__init__(f"{code}: {message}")
-
-class FpaDevice:
-    id: str
-    device_id: str
-    title: str
-    wifi_mac_address: str
-    ble_mac_address: str
-
-    def __init__(self, json):
-        self.id = json['id']
-        self.device_id = json['deviceId']
-        self.title = json['title']
-        self.wifi_mac_address = json['wifiMacAddress']
-        self.ble_mac_address = json['bleMacAddress']
 
 class FpaFormula:
     territory: str
@@ -68,11 +56,102 @@ class FpaBottle:
         self.water_only = json["waterOnly"]
         self.formula = FpaFormula(json["formula"])
 
-class FpaDeviceDetails:
-    bottles: List[FpaBottle]
+class FpaBottleCreationLog:
+    id: int
+    volume: int
+    volume_unit: str
+    temperature: int
+    bottle_id: int
+    powder_setting: int
+    water_only: bool
+    completion_timestamp: str
 
     def __init__(self, json):
+        self.id = json['id']
+        self.volume = json['volume']
+        self.volume_unit = json['volumeUnit']
+        self.temperature = json['temperature']
+        self.bottle_id = json['bottleId']
+        self.powder_setting = json['powderSetting']
+        self.water_only = json['waterOnly']
+        self.completion_timestamp = json['completionTimestamp']
+
+class FpaShadow:
+    connected: bool
+
+    # settings
+    temperature: int
+    powder: int
+    volume: int
+    volume_unit: str
+    making_bottle: bool
+    water_only: bool
+
+    # hardware/alerts
+    bottle_missing: bool
+    funnel_cleaning_needed: bool
+    funnel_out: bool
+    lid_open: bool
+    low_water: bool
+
+    def __init__(self):
+        self._data = {}
+
+    def _merge(self, d1, d2):
+        for k, v in d1.items():
+            if k in d2:
+                if isinstance(v, dict) and isinstance(d2[k], dict):
+                    d2[k] = self._merge(v, d2[k])
+        d1.update(d2)
+        return d1
+
+    def update(self, json):
+        self._data = self._merge(self._data, json)
+        _LOGGER.info(f"Shadow Merged: {str(self._data)}")
+        r = self._data['state']['reported']
+
+        self.connected = r['connected']
+
+        self.temperature = r['settings']["temperature"]
+        self.powder = r['settings']["powder"]
+        self.volume = r['settings']["volume"]
+        self.volume_unit = r['settings']["volumeUnit"]
+        self.making_bottle = r['settings']["makingBottle"]
+        self.water_only = r['settings']["waterOnly"]
+
+        self.bottle_missing = r['hardware']['alerts']["bottleMissing"]
+        self.funnel_cleaning_needed = r['hardware']['alerts']["funnelCleaningNeeded"]
+        self.funnel_out = r['hardware']['alerts']["funnelOut"]
+        self.lid_open = r['hardware']['alerts']["lidOpen"]
+        self.low_water = r['hardware']['alerts']["lowWater"]
+
+class FpaDevice:
+    id: str
+    device_id: str
+    title: str
+    wifi_mac_address: str
+    ble_mac_address: str
+
+    has_details: bool
+
+    bottles: List[FpaBottle]
+    bottleCreationLog: List[FpaBottleCreationLog]
+    shadow: FpaShadow
+
+    def __init__(self, json):
+        self.id = json['id']
+        self.device_id = json['deviceId']
+        self.title = json['title']
+        self.wifi_mac_address = json['wifiMacAddress']
+        self.ble_mac_address = json['bleMacAddress']
+        self.has_details = False
+
+    def update_details(self, json):
+        self.has_details = True
         self.bottles = [FpaBottle(b) for b in json["bottles"]]
+        self.bottle_creation_log = [FpaBottleCreationLog(b) for b in json["bottleCreationLog"]]
+        self.shadow = FpaShadow()
+        self.shadow.update(json["shadow"])
 
 class Fpa:
     refresh_token: str
@@ -84,6 +163,10 @@ class Fpa:
     last_name: str
     devices: List[FpaDevice]
 
+    api_url: str
+    websockets_url: str
+    _listeners: List[Callable[[FpaDevice], None]]
+
     def __init__(self, session: aiohttp.ClientSession = None):
         self._session = session
 
@@ -92,10 +175,20 @@ class Fpa:
             self._session = aiohttp.ClientSession()
 
         self.has_me = False
+        self._listeners = []
 
-    async def login(self, email, password):
+    async def _initialize(self):
+        async with self._session.get('https://info.babybrezzacloud.com') as resp:
+            j = await resp.json()
+            if resp.status != 200:
+                raise FpaError(resp.status, j.message)
+            self.api_url = f"https://{j['api']}"
+            self.websockets_url = j['websockets']
+
+    async def login(self, email: str, password: str):
+        await self._initialize()
         jreq = {'email': email, 'password': password}
-        async with self._session.post('https://api.babybrezzacloud.com/authentication/login',
+        async with self._session.post(f'{self.api_url}/authentication/login',
                                       json=jreq) as resp:
             j = await resp.json()
             if resp.status != 200:
@@ -108,9 +201,10 @@ class Fpa:
             self.devices = [FpaDevice(d) for d in j['devices']]
             self.has_me = True
 
-    async def refresh(self, refresh_token):
+    async def refresh(self, refresh_token: str):
+        await self._initialize()
         jreq = {'refreshToken': refresh_token}
-        async with self._session.post('https://api.babybrezzacloud.com/authentication/refresh',
+        async with self._session.post(f'{self.api_url}/authentication/refresh',
                                       json=jreq) as resp:
             j = await resp.json()
             if resp.status != 200:
@@ -124,7 +218,7 @@ class Fpa:
         }
 
     async def get_me(self):
-        async with self._session.get('https://api.babybrezzacloud.com/authentication/me',
+        async with self._session.get(f'{self.api_url}/authentication/me',
                                      headers=self._headers()) as resp:
             j = await resp.json()
             if resp.status != 200:
@@ -135,20 +229,59 @@ class Fpa:
             self.devices = [FpaDevice(d) for d in j['devices']]
             self.has_me = True
 
-    async def get_device_details(self, device_id):
-        async with self._session.get(f'https://api.babybrezzacloud.com/devices/{device_id}/details',
-                                     headers=self._headers()) as resp:
-            j = await resp.json()
-            if resp.status != 200:
-                raise FpaError(resp.status, j.message)
-            return FpaDeviceDetails(j)
+    def _find_device(self, device_id: str) -> FpaDevice:
+        for device in self.devices:
+            if device.device_id == device_id:
+                return device
+        return None
 
-    async def start_bottle(self, bottle_id):
-        async with self._session.put(f'https://api.babybrezzacloud.com/bottles/{bottle_id}/start',
+    async def get_device_details(self, device_id: str) -> FpaDevice:
+        device = self._find_device(device_id)
+        async with self._session.get(f'{self.api_url}/devices/{device_id}/details',
                                      headers=self._headers()) as resp:
             j = await resp.json()
             if resp.status != 200:
                 raise FpaError(resp.status, j.message)
+            device.update_details(j)
+            return device
+
+    async def start_bottle(self, bottle_id: int):
+        async with self._session.put(f'{self.api_url}/bottles/{bottle_id}/start',
+                                     headers=self._headers()) as resp:
+            j = await resp.json()
+            if resp.status != 200:
+                raise FpaError(resp.status, j.message)
+
+    async def _client(self, device_id: str):
+        async with self._session.ws_connect(f"{self.websockets_url}?Authorization={urllib.parse.quote_plus(self.token)}&deviceId={urllib.parse.quote_plus(device_id)}") as ws:
+            _LOGGER.info("Client connected")
+            while True:
+                msg = await ws.receive_json()
+                if msg['subject'] == 'shadow-update':
+                    device = self._find_device(msg['body']['deviceId'])
+                    device.shadow.update(msg['body'])
+                    for listener in self._listeners:
+                        listener(device)
+                else:
+                    _LOGGER.info(f"Unknown subject '{msg['subject']}'")
+
+
+    async def start_client(self, device_id: str):
+        if not self.has_me:
+            await self.get_me()
+        device = self._find_device(device_id)
+        if not device.has_details:
+            await self.get_device_details(device_id)
+        loop = asyncio.get_event_loop()
+        loop.create_task(self._client(device_id))
+
+    def add_listener(self, callback: Callable[[FpaDevice], None]) -> Callable[[], None]:
+        self._listeners.append(callback)
+
+        def remove():
+            self._listeners.remove(callback)
+        
+        return remove
 
     async def close(self):
         if self._session_created:
