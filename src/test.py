@@ -3,6 +3,7 @@ import logging
 import argparse
 import asyncio
 import getpass
+import datetime
 from pyfpa import Fpa, FpaDevice
 
 
@@ -40,19 +41,20 @@ async def cmd_start(fpa, args):
 
 async def cmd_listen(fpa, args):
     def device_updated(device: FpaDevice):
-        print("Updated: " +
+        print(f"{datetime.datetime.now()}: " +
+              ('connected ' if device.connected else '') +
               ('bottle_missing ' if device.shadow.bottle_missing else '') +
               ('funnel_cleaning_needed ' if device.shadow.funnel_cleaning_needed else '') +
               ('funnel_out ' if device.shadow.funnel_out else '') +
               ('lid_open ' if device.shadow.lid_open else '') +
               ('low_water ' if device.shadow.low_water else '') +
               ('making_bottle ' if device.shadow.making_bottle else '') +
-              ('connected ' if device.shadow.connected else '') +
+              ('shadow_connected ' if device.shadow.connected else '') +
               ('water_only ' if device.shadow.water_only else '') +
               f"{device.shadow.volume}{device.shadow.volume_unit}")
 
     remove = fpa.add_listener(device_updated)
-    await fpa.start_client(args.device_id)
+    await fpa.connect_to_device(args.device_id)
 
     await asyncio.Event().wait()
     remove()
@@ -91,7 +93,7 @@ async def main():
 
     args = parser.parse_args()
 
-    logging.basicConfig(level=args.verbose)
+    logging.basicConfig(level=args.verbose, format='%(asctime)s %(message)s')
 
     fpa = Fpa()
 

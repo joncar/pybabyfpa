@@ -107,7 +107,7 @@ class FpaShadow:
 
     def update(self, json):
         self._data = self._merge(self._data, json)
-        _LOGGER.info(f"Shadow Merged: {str(self._data)}")
+        _LOGGER.debug(f"Shadow Merged: {str(self._data)}")
         r = self._data['state']['reported']
 
         self.connected = r['connected']
@@ -138,6 +138,8 @@ class FpaDevice:
     bottleCreationLog: List[FpaBottleCreationLog]
     shadow: FpaShadow
 
+    connected: bool
+
     def __init__(self, json):
         self.id = json['id']
         self.device_id = json['deviceId']
@@ -145,6 +147,7 @@ class FpaDevice:
         self.wifi_mac_address = json['wifiMacAddress']
         self.ble_mac_address = json['bleMacAddress']
         self.has_details = False
+        self.connected = False
 
     def update_details(self, json):
         self.has_details = True
@@ -152,6 +155,74 @@ class FpaDevice:
         self.bottle_creation_log = [FpaBottleCreationLog(b) for b in json["bottleCreationLog"]]
         self.shadow = FpaShadow()
         self.shadow.update(json["shadow"])
+
+class FpaDeviceClient:
+    fpa: 'Fpa'
+    device_id: str
+    delay_seconds: int
+    ping_seconds: int
+
+    loop: asyncio.AbstractEventLoop
+    _ws: aiohttp.ClientWebSocketResponse
+
+    def __init__(self, fpa: 'Fpa', device_id: str):
+        self.fpa = fpa
+        self.device_id = device_id
+
+        self.delay_seconds = 1
+        self.ping_seconds = 600
+
+        self._ws = None
+
+        self.loop = asyncio.get_running_loop()
+        self.loop.create_task(self._client())
+        self.loop.create_task(self._ping())
+
+    async def _ping(self):
+        while not self.fpa.closed:
+            if self._ws is not None:
+                _LOGGER.info("Ping!")
+                await self._ws.ping()
+            await asyncio.sleep(self.ping_seconds)
+
+    async def _client(self):
+        while not self.fpa.closed:
+            device = self.fpa._find_device(self.device_id)
+            _LOGGER.info(f"Client for {device.device_id} connecting")
+            async with self.fpa._session.ws_connect(f"{self.fpa.websockets_url}?Authorization={urllib.parse.quote_plus(self.fpa.token)}&deviceId={urllib.parse.quote_plus(self.device_id)}") as ws:
+                self._ws = ws
+
+                try:
+                    device = self.fpa._find_device(self.device_id)
+                    _LOGGER.info(f"Client for {device.device_id} connected")
+                    device.connected = True
+                    self.fpa._call_listeners(device)
+
+                    self.delay_seconds = 1
+
+                    while not ws.closed:
+                        msg = await ws.receive_json()
+                        if msg['subject'] == 'shadow-update':
+                            device = self.fpa._find_device(msg['body']['deviceId'])
+                            device.shadow.update(msg['body'])
+                            self.fpa._call_listeners(device)
+                        else:
+                            _LOGGER.info(f"Unknown subject '{msg['subject']}': {str(msg['body'])}")
+                except Exception as exc:
+                    _LOGGER.exception("Exception on WebSockets")
+                finally:
+                    self._ws = None
+
+                    device = self.fpa._find_device(self.device_id)
+                    _LOGGER.info(f"Client for {device.device_id} disconnected. "
+                                 f"Delay {self.delay_seconds} seconds before reconnecting...")
+                    device.connected = False
+                    self.fpa._call_listeners(device)
+
+            await asyncio.sleep(self.delay_seconds)
+            self.delay_seconds = min(600, self.delay_seconds * 2)
+
+            await self.fpa.refresh(self.fpa.refresh_token)
 
 class Fpa:
     refresh_token: str
@@ -166,18 +237,26 @@ class Fpa:
     api_url: str
     websockets_url: str
     _listeners: List[Callable[[FpaDevice], None]]
+    _session: aiohttp.ClientSession
+    closed: bool
 
     def __init__(self, session: aiohttp.ClientSession = None):
+        self.has_me = False
+
+        self.api_url = None
+        self.websockets_url = None
+        self._listeners = []
         self._session = session
+        self.closed = False
 
         self._session_created = session is None
         if self._session_created:
             self._session = aiohttp.ClientSession()
 
-        self.has_me = False
-        self._listeners = []
-
     async def _initialize(self):
+        if self.api_url is not None and self.websockets_url is not None:
+            return
+
         async with self._session.get('https://info.babybrezzacloud.com') as resp:
             j = await resp.json()
             if resp.status != 200:
@@ -252,28 +331,18 @@ class Fpa:
             if resp.status != 200:
                 raise FpaError(resp.status, j.message)
 
-    async def _client(self, device_id: str):
-        async with self._session.ws_connect(f"{self.websockets_url}?Authorization={urllib.parse.quote_plus(self.token)}&deviceId={urllib.parse.quote_plus(device_id)}") as ws:
-            _LOGGER.info("Client connected")
-            while True:
-                msg = await ws.receive_json()
-                if msg['subject'] == 'shadow-update':
-                    device = self._find_device(msg['body']['deviceId'])
-                    device.shadow.update(msg['body'])
-                    for listener in self._listeners:
-                        listener(device)
-                else:
-                    _LOGGER.info(f"Unknown subject '{msg['subject']}'")
+    def _call_listeners(self, device):
+        loop = asyncio.get_running_loop()
+        for listener in self._listeners:
+            loop.call_soon(listener, device)
 
-
-    async def start_client(self, device_id: str):
+    async def connect_to_device(self, device_id: str):
         if not self.has_me:
             await self.get_me()
         device = self._find_device(device_id)
         if not device.has_details:
             await self.get_device_details(device_id)
-        loop = asyncio.get_event_loop()
-        loop.create_task(self._client(device_id))
+        FpaDeviceClient(self, device_id)
 
     def add_listener(self, callback: Callable[[FpaDevice], None]) -> Callable[[], None]:
         self._listeners.append(callback)
@@ -286,3 +355,4 @@ class Fpa:
     async def close(self):
         if self._session_created:
             await self._session.close()
+        self.closed = True
