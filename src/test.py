@@ -11,9 +11,6 @@ async def cmd_none(fpa, args):
     print("Nothing to do. See -h.")
 
 async def cmd_me(fpa, args):
-    if not fpa.has_me:
-        await fpa.get_me()
-
     print(f"Name: {fpa.first_name} {fpa.last_name}")
     print(f"Email: {fpa.email}")
 

@@ -119,11 +119,12 @@ class FpaShadow:
         self.making_bottle = r['settings']["makingBottle"]
         self.water_only = r['settings']["waterOnly"]
 
-        self.bottle_missing = r['hardware']['alerts']["bottleMissing"]
-        self.funnel_cleaning_needed = r['hardware']['alerts']["funnelCleaningNeeded"]
-        self.funnel_out = r['hardware']['alerts']["funnelOut"]
-        self.lid_open = r['hardware']['alerts']["lidOpen"]
-        self.low_water = r['hardware']['alerts']["lowWater"]
+        alerts = r['hardware'].get('alerts', {})
+        self.bottle_missing = alerts.get("bottleMissing", False)
+        self.funnel_cleaning_needed = alerts.get("funnelCleaningNeeded", False)
+        self.funnel_out = alerts.get("funnelOut", False)
+        self.lid_open = alerts.get("lidOpen", False)
+        self.low_water = alerts.get("lowWater", False)
 
 class FpaDevice:
     id: str
@@ -290,6 +291,7 @@ class Fpa:
                 raise FpaError(resp.status, j.message)
             self.refresh_token = j['refreshToken']
             self.token = j['token']
+            await self.get_me()
 
     def _headers(self):
         return {
