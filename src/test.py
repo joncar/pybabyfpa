@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import getpass
 import datetime
-from pyfpa import Fpa, FpaDevice
+from pybabyfpa import Fpa, FpaDevice
 
 
 async def cmd_none(fpa, args):

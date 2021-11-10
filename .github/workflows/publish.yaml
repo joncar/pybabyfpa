@@ -27,7 +27,7 @@ jobs:
       - name: Archive package
         uses: actions/upload-artifact@v2
         with:
-          name: pyfpa
+          name: pybabyfpa
           path: dist
 
       - name: Publish a Python distribution to PyPI

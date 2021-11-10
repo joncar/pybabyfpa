@@ -1,4 +1,4 @@
-# pyfpa
+# pybabyfpa
 
 This package can be used to control Baby Brezza's Formula Pro Advanced WiFi.
 
@@ -8,16 +8,13 @@ NOTE: This is an unofficial community project which is not affiliated with Baby 
 
 ```
 import asyncio
-from pyfpa import Fpa
+from pybabyfpa import Fpa
 
 async def main():
     fpa = Fpa()
     
     await fpa.login("email@example.com", "password")
     # await fpa.refresh(refresh_token_from_previous_session)
-
-    if not fpa.has_me:
-        await fpa.get_me()
 
     # Basic user information
     print(f"Name: {fpa.first_name} {fpa.last_name}")
