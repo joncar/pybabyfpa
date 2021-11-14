@@ -6,7 +6,7 @@ import urllib.parse
 
 _LOGGER = logging.getLogger(__name__)
 
-__version__ = '0.0.5'
+__version__ = '0.0.6'
 
 class FpaError(Exception):
     code: int
@@ -207,6 +207,8 @@ class FpaDeviceClient:
                         msg = await ws.receive_json()
                         if msg['subject'] == 'shadow-update':
                             device = self.fpa._find_device(msg['body']['deviceId'])
+                            if not device.has_details:
+                                await self.fpa.get_device_details(device.device_id)
                             device.shadow.update(msg['body'])
                             self.fpa._call_listeners(device)
                         else:
@@ -293,7 +295,8 @@ class Fpa:
                 raise FpaError(resp.status, j.message)
             self.refresh_token = j['refreshToken']
             self.token = j['token']
-            await self.get_me()
+            if not self.has_me:
+                await self.get_me()
 
     def _headers(self):
         return {
