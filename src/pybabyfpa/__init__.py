@@ -6,7 +6,7 @@ import urllib.parse
 
 _LOGGER = logging.getLogger(__name__)
 
-__version__ = '0.0.6'
+__version__ = '0.0.7'
 
 class FpaError(Exception):
     code: int
@@ -46,7 +46,7 @@ class FpaBottle:
     volume: int
     volume_unit: str
     water_only: bool
-    formula: FpaFormula
+    formula: FpaFormula | None
 
     def __init__(self, json):
         self.id = json["id"]
@@ -56,7 +56,7 @@ class FpaBottle:
         self.volume = json["volume"]
         self.volume_unit = json["volumeUnit"]
         self.water_only = json["waterOnly"]
-        self.formula = FpaFormula(json["formula"])
+        self.formula = FpaFormula(json["formula"]) if "formula" in json else None
 
 class FpaBottleCreationLog:
     id: int
