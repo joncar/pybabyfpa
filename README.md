@@ -6,7 +6,7 @@ NOTE: This is an unofficial community project which is not affiliated with Baby 
 
 # Sample Usage
 
-```
+```python
 import asyncio
 from pybabyfpa import Fpa
 
